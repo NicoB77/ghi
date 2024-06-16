@@ -3,7 +3,7 @@ import collections
 import configparser
 import datetime
 from enum import Enum
-from functools import total_ordering
+from functools import total_ordering, wraps
 import glob
 import itertools
 import os
@@ -151,8 +151,11 @@ class Config:
 		self.wb_fn_pattern = wb_cfg['filename_pattern']
 		self.day_shift_start_time = datetime.datetime.strptime(cp.get('Shifts', 'day_start'), '%H:%M')
 		self.day_shift_end_time = datetime.datetime.strptime(cp.get('Shifts', 'day_end'), '%H:%M')
-		self.table_col_width = cp.getint('GUI', 'table_col_width')
-		self.n_midwifes_per_row = cp.getint('GUI', 'n_midwifes_per_row')
+		gui_cfg = cp['GUI']
+		self.table_col_width = gui_cfg.getint('table_col_width')
+		self.n_midwifes_per_row = gui_cfg.getint('n_midwifes_per_row')
+		self.new_forwarding_color = gui_cfg['new_forwarding_color']
+		self.duty_forwarding_mismatch_color = gui_cfg['duty_forwarding_mismatch_color']
 		self.webex_integration = cp['WebexIntegration']
 
 
@@ -177,6 +180,18 @@ class AutoAttendant:
 			for duty in attendant_rule.event_by_duty:
 				roster.Add(midwife, duty)
 		return roster
+
+
+def _TokenRefresher(method):
+	@wraps(method)
+	def Wrapped(api, url, **kw_args):
+		url = f'{api.base_url}/{url}'
+		try:
+			return method(api, url, **kw_args)
+		except TokenExpiredError:
+			api.RefreshToken()
+			return method(api, url, **kw_args)
+	return Wrapped
 
 
 class WebexApi:
@@ -216,24 +231,20 @@ class WebexApi:
 		with open(self.token_fn, 'w', encoding='utf8') as fo:
 			self.cfg.write(fo)
 
-	def _Get(self, url):
-		response = self.session.get(f'{self.base_url}/{url}')
+	@_TokenRefresher
+	def Get(self, url):
+		response = self.session.get(url)
 		response.raise_for_status()
 		return response.json()
 
-	def Get(self, url):
-		try:
-			return self._Get(url)
-		except TokenExpiredError:
-			self.RefreshToken()
-			return self._Get(url)
-
+	@_TokenRefresher
 	def Delete(self, url):
-		response = self.session.delete(f'{self.base_url}/{url}')
+		response = self.session.delete(url)
 		response.raise_for_status()
 
+	@_TokenRefresher
 	def Post(self, url, json):
-		response = self.session.post(f'{self.base_url}/{url}', json=json)
+		response = self.session.post(url, json=json)
 		response.raise_for_status()
 		return response.json()
 
@@ -335,6 +346,15 @@ class WebexApi:
 			rule.event_by_duty.update(self.GetDuties(auto_attendant.location_id, rule.schedule_id))
 
 
+class BoxStyle:
+	def __init__(self, box, forwarding):
+		self.box = box
+		self.forwarding = forwarding
+
+	def OnSelected(self, _):
+		self.box['style'] = 'TCombobox' if self.box.get() == self.forwarding else 'New.TCombobox'
+
+
 class GHI:
 	title = 'Geburtshaus Idstein - Rufbereitschaft'
 
@@ -351,6 +371,8 @@ class GHI:
 
 	def StartGui(self):
 		root = tkinter.Tk()
+		style = ttk.Style()
+		style.configure('New.TCombobox', foreground=self.config.new_forwarding_color, background=self.config.new_forwarding_color)
 		root.title(self.title)
 		self.table_frame = ttk.LabelFrame(root, text='Rufumleitungen')
 		self.table_frame.grid(row=0, column=0, sticky='nswe', padx=2, pady=2)
@@ -443,30 +465,50 @@ class GHI:
 			ttk.Label(self.table_frame, text=str(date.day), font='TkHeadingFont', justify='center', width=self.config.table_col_width).grid(row=0, column=col)
 		n_cols = 2+len(dates)
 		ttk.Separator(self.table_frame, orient='horizontal').grid(row=1, column=0, sticky='we', columnspan=n_cols)
-		row = 2
-		initial_value_by_duty = {}
-		for label, roster in [('Dienstplan', self.duty_roster), ('Rufumleitung', self.forwarding_roster)]:
-			if roster and min_date <= roster.dates[-1]:
+		box_row = 2
+		if self.duty_roster and min_date <= self.duty_roster.dates[-1]:
+			duty_row = box_row
+			box_row += 3
+		else:
+			duty_row = None
+		if self.forwarding_roster and min_date <= self.forwarding_roster.dates[-1]:
+			forwarding_row = box_row
+			box_row += 3
+		else:
+			forwarding_row = None
+		for label, row in [('Dienstplan', duty_row), ('Rufumleitung', forwarding_row)]:
+			if row:
 				ttk.Label(self.table_frame, text=label, font='TkHeadingFont').grid(row=row, column=0)
 				ttk.Label(self.table_frame, text='T', font='TkHeadingFont').grid(row=row, column=1)
 				ttk.Label(self.table_frame, text='N', font='TkHeadingFont').grid(row=row+1, column=1)
-				for duty, midwife in roster.midwife_by_duty.items():
-					if min_date <= duty.date:
-						ttk.Label(self.table_frame, text=key_by_midwife[midwife], justify='center', width=self.config.table_col_width).grid(row=row+duty.shift.value, column=col_by_date[duty.date])
-						if duty not in initial_value_by_duty:
-							initial_value_by_duty[duty] = key_by_midwife[midwife]
-				ttk.Separator(self.table_frame, orient='horizontal').grid(row=row+2, column=0, sticky='we', columnspan=n_cols)
-				row += 3
-		ttk.Label(self.table_frame, text='T', font='TkHeadingFont').grid(row=row, column=1)
-		ttk.Label(self.table_frame, text='N', font='TkHeadingFont').grid(row=row+1, column=1)
+				ttk.Separator(self.table_frame, orient='horizontal').grid(row=row + 2, column=0, sticky='we', columnspan=n_cols)
+		ttk.Label(self.table_frame, text='T', font='TkHeadingFont').grid(row=box_row, column=1)
+		ttk.Label(self.table_frame, text='N', font='TkHeadingFont').grid(row=box_row+1, column=1)
 		box_values = tuple(sorted(self.midwife_by_box_value))
 		for date, col in col_by_date.items():
 			for shift in Shift:
 				duty = Duty(date, shift)
+				if self.duty_roster and duty in self.duty_roster.midwife_by_duty:
+					roster = key_by_midwife[self.duty_roster.midwife_by_duty[duty]]
+				else:
+					roster = None
+				if self.forwarding_roster and duty in self.forwarding_roster.midwife_by_duty:
+					forwarding = key_by_midwife[self.forwarding_roster.midwife_by_duty[duty]]
+				else:
+					forwarding = None
+				color = {'background': self.config.duty_forwarding_mismatch_color} if roster != forwarding and roster and forwarding else {}
+				for value, row in [(roster, duty_row), (forwarding, forwarding_row)]:
+					if value:
+						ttk.Label(self.table_frame, text=value, justify='center', width=self.config.table_col_width, **color).grid(row=row+duty.shift.value, column=col)
 				self.box_by_duty[duty] = ttk.Combobox(self.table_frame, values=box_values, state='readonly', justify='center', width=self.config.table_col_width)
-				if duty in initial_value_by_duty:
-					self.box_by_duty[duty].set(initial_value_by_duty[duty])
-				self.box_by_duty[duty].grid(row=row+shift.value, column=col, sticky='we')
+				value = forwarding or roster
+				box = self.box_by_duty[duty]
+				if value:
+					box.set(value)
+					if value != forwarding:
+						box['style'] = 'New.TCombobox'
+				box.bind('<<ComboboxSelected>>', BoxStyle(box, forwarding).OnSelected)
+				box.grid(row=box_row+shift.value, column=col, sticky='we')
 		self.table_frame.columnconfigure(tuple(range(1, n_cols+1)), weight=1)
 		row = 0
 		col = 0
