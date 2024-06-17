@@ -5,13 +5,16 @@ import datetime
 from enum import Enum
 from functools import total_ordering
 import glob
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import itertools
 import os
 import re
+from threading import Thread
 import tkinter
 from tkinter import filedialog
 from tkinter import messagebox
 from tkinter import ttk
+from urllib.parse import urlparse
 import webbrowser
 
 import openpyxl
@@ -181,6 +184,15 @@ class AutoAttendant:
 		return roster
 
 
+class _Handler(BaseHTTPRequestHandler):
+	def do_GET(self):
+		self.server.last_request_path = self.path
+		self.send_response(200)
+		self.send_header('Content-type', 'text/html; charset=utf-8')
+		self.end_headers()
+		self.wfile.write('Das Code für das Token wurde erfolgreich abgerufen.'.encode())
+
+
 class WebexApi:
 	scopes = ('spark-admin:telephony_config_read', 'spark-admin:telephony_config_write')
 	base_url = 'https://webexapis.com/v1/telephony/config'
@@ -188,17 +200,22 @@ class WebexApi:
 	def __init__(self, integration_config, token_fn):
 		self._client_id = integration_config['client_id']
 		self._secret = integration_config['client_secret']
+		self.redirect_uri = integration_config['redirect_uri']
 		self.token_fn = token_fn
 		self.cfg = configparser.ConfigParser()
 		self.cfg.read(token_fn, encoding='utf8')
+		min_token_expiry = datetime.datetime.today()+datetime.timedelta(hours=12)
 		try:
-			token = {k: self.cfg.get('Webex', k) for k in ('access_token', 'token_type')}
+			if min_token_expiry < datetime.datetime.fromisoformat(self.cfg.get('Webex', 'refresh_token_expires_at')):
+				token = {k: self.cfg.get('Webex', k) for k in ('access_token', 'token_type')}
+			else:
+				token = None
 		except (configparser.NoSectionError, configparser.NoOptionError):
 			token = None
-		self.session = OAuth2Session(client_id=self._client_id, scope=self.scopes, redirect_uri=integration_config['redirect_uri'], token=token)
+		self.session = OAuth2Session(client_id=self._client_id, scope=self.scopes, redirect_uri=self.redirect_uri, token=token)
 		if not token:
 			self.GetAccessToken()
-		elif token and datetime.datetime.fromisoformat(self.cfg.get('Webex', 'expires_at')) < datetime.datetime.today()+datetime.timedelta(hours=12):
+		elif token and datetime.datetime.fromisoformat(self.cfg.get('Webex', 'expires_at')) < min_token_expiry:
 			self.RefreshToken()
 
 	def _Token(self):
@@ -221,9 +238,25 @@ class WebexApi:
 
 	def GetAccessToken(self):
 		url, _ = self.session.authorization_url('https://webexapis.com/v1/authorize')
+		messagebox.showinfo(GHI.title, 'Um die Zugangsberechtigung zu bestätigen, wird ein Browser-Fenster geöffnet.')
+		server = HTTPServer(('localhost', urlparse(self.redirect_uri).port), _Handler)
+		thread = Thread(target=server.handle_request)
+		thread.start()
 		webbrowser.open_new(url)
-		authorization_response = input('Die vollständige Adresszeile aus dem Browser kopieren und hier einfügen: ')
-		self.SaveToken(self.session.fetch_token('https://webexapis.com/v1/access_token', authorization_response=authorization_response, client_secret=self._secret))
+		thread.join()
+		authorization_response = self.redirect_uri+server.last_request_path
+		# authorization_response = input('Die vollständige Adresszeile aus dem Browser kopieren und hier einfügen: ')
+		env_key = 'OAUTHLIB_INSECURE_TRANSPORT'
+		env_value = os.environ.get(env_key)
+		os.environ[env_key] = '1'
+		try:
+			token = self.session.fetch_token('https://webexapis.com/v1/access_token', authorization_response=authorization_response, client_secret=self._secret)
+		finally:
+			if env_value is None:
+				del os.environ[env_key]
+			else:
+				os.environ[env_key] = env_value
+		self.SaveToken(token)
 
 	def RefreshToken(self):
 		self.SaveToken(self.session.refresh_token('https://webexapis.com/v1/access_token', refresh_token=self.cfg.get('Webex', 'refresh_token'), client_id=self._client_id, client_secret=self._secret))
