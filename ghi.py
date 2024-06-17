@@ -3,7 +3,7 @@ import collections
 import configparser
 import datetime
 from enum import Enum
-from functools import total_ordering, wraps
+from functools import total_ordering
 import glob
 import itertools
 import os
@@ -15,7 +15,6 @@ from tkinter import ttk
 import webbrowser
 
 import openpyxl
-from oauthlib.oauth2 import TokenExpiredError
 from requests_oauthlib import OAuth2Session
 
 
@@ -182,18 +181,6 @@ class AutoAttendant:
 		return roster
 
 
-def _TokenRefresher(method):
-	@wraps(method)
-	def Wrapped(api, url, **kw_args):
-		url = f'{api.base_url}/{url}'
-		try:
-			return method(api, url, **kw_args)
-		except TokenExpiredError:
-			api.RefreshToken()
-			return method(api, url, **kw_args)
-	return Wrapped
-
-
 class WebexApi:
 	scopes = ('spark-admin:telephony_config_read', 'spark-admin:telephony_config_write')
 	base_url = 'https://webexapis.com/v1/telephony/config'
@@ -204,12 +191,15 @@ class WebexApi:
 		self.token_fn = token_fn
 		self.cfg = configparser.ConfigParser()
 		self.cfg.read(token_fn, encoding='utf8')
-		access_token = self.cfg.get('Webex', 'access_token')
-		if access_token:
-			tk = {'access_token': access_token, self.cfg.get('Webex', 'token_type'): 'Bearer'}
-		else:
-			tk = None
-		self.session = OAuth2Session(client_id=self._client_id, scope=self.scopes, redirect_uri=integration_config['redirect_uri'], token=tk)
+		try:
+			token = {k: self.cfg.get('Webex', k) for k in ('access_token', 'token_type')}
+		except (configparser.NoSectionError, configparser.NoOptionError):
+			token = None
+		self.session = OAuth2Session(client_id=self._client_id, scope=self.scopes, redirect_uri=integration_config['redirect_uri'], token=token)
+		if not token:
+			self.GetAccessToken()
+		elif token and datetime.datetime.fromisoformat(self.cfg.get('Webex', 'expires_at')) < datetime.datetime.today()+datetime.timedelta(hours=12):
+			self.RefreshToken()
 
 	def _Token(self):
 		access_token = self.cfg.get('Webex', 'access_token')
@@ -217,34 +207,38 @@ class WebexApi:
 			return {'access_token': access_token, self.cfg.get('Webex', 'token_type'): 'Bearer'}
 		return None
 
-	def GetAccessToken(self):
-		url, _ = self.session.authorization_url('https://webexapis.com/v1/authorize')
-		webbrowser.open_new(url)
-		authorization_response = input('Enter the full callback URL')
-		return self.session.fetch_token('https://webexapis.com/v1/access_token', authorization_response=authorization_response, client_secret=self._secret)
-
-	def RefreshToken(self):
-		token = self.session.refresh_token('https://webexapis.com/v1/access_token', refresh_token=self.cfg.get('Webex', 'refresh_token'), client_id=self._client_id, client_secret=self._secret)
+	def SaveToken(self, token):
+		now = datetime.datetime.today()
+		if not self.cfg.has_section('Webex'):
+			self.cfg.add_section('Webex')
 		cfg = self.cfg['Webex']
 		for key in ('access_token', 'token_type', 'refresh_token'):
 			cfg[key] = token[key]
+		for key in ('expires_in', 'refresh_token_expires_in'):
+			cfg[key.replace('_in', '_at')] = (now+datetime.timedelta(seconds=token[key]-10)).strftime('%Y-%m-%d %H:%M')
 		with open(self.token_fn, 'w', encoding='utf8') as fo:
 			self.cfg.write(fo)
 
-	@_TokenRefresher
+	def GetAccessToken(self):
+		url, _ = self.session.authorization_url('https://webexapis.com/v1/authorize')
+		webbrowser.open_new(url)
+		authorization_response = input('Die vollständige Adresszeile aus dem Browser kopieren und hier einfügen: ')
+		self.SaveToken(self.session.fetch_token('https://webexapis.com/v1/access_token', authorization_response=authorization_response, client_secret=self._secret))
+
+	def RefreshToken(self):
+		self.SaveToken(self.session.refresh_token('https://webexapis.com/v1/access_token', refresh_token=self.cfg.get('Webex', 'refresh_token'), client_id=self._client_id, client_secret=self._secret))
+
 	def Get(self, url):
-		response = self.session.get(url)
+		response = self.session.get(f'{self.base_url}/{url}')
 		response.raise_for_status()
 		return response.json()
 
-	@_TokenRefresher
 	def Delete(self, url):
-		response = self.session.delete(url)
+		response = self.session.delete(f'{self.base_url}/{url}')
 		response.raise_for_status()
 
-	@_TokenRefresher
 	def Post(self, url, json):
-		response = self.session.post(url, json=json)
+		response = self.session.post(f'{self.base_url}/{url}', json=json)
 		response.raise_for_status()
 		return response.json()
 
@@ -339,7 +333,6 @@ class WebexApi:
 				schedule_id = self.Post(f'locations/{auto_attendant.location_id}/schedules', {'type': 'holidays', 'name': midwife.name, 'events': events})['id']
 				rule = {'name': midwife.name, 'enabled': True, 'holidaySchedule': midwife.name, 'forwardTo': {'phoneNumber': midwife.phone, 'selection': 'FORWARD_TO_SPECIFIED_NUMBER'}, 'callsFrom': {'selection': 'ANY'}}
 				rule_id = self.Post(f'locations/{auto_attendant.location_id}/autoAttendants/{auto_attendant.id}/callForwarding/selectiveRules', rule)['id']
-				# https://webexapis.com/v1/telephony/config/locations/{locationId}/autoAttendants/{autoAttendantId}/callForwarding/selectiveRules
 				auto_attendant.AddRule(midwife, AttendantRule(rule_id, midwife.name, schedule_id, {}))
 		for rule in auto_attendant.rule_by_midwife.values():
 			rule.event_by_duty.clear()
@@ -399,8 +392,7 @@ class GHI:
 		for duty, box in self.box_by_duty.items():
 			value = box.get()
 			if value and self.forwarding_roster.midwife_by_duty.get(duty) != self.midwife_by_box_value[value]:
-				if value in ('AR', 'MW'):
-					midwife_by_duty[duty] = self.midwife_by_box_value[value]
+				midwife_by_duty[duty] = self.midwife_by_box_value[value]
 		self.api.Upload(self.attendant, midwife_by_duty)
 		self.LoadForwardings()
 
@@ -526,7 +518,7 @@ def Main():
 		app_dir = os.path.dirname(__file__)
 		GHI(os.path.join(app_dir, 'ghi.ini'), os.path.join(app_dir, 'token.ini')).StartGui()
 	except Exception as ex:
-		messagebox.showerror(GHI.title, f'Fehler beim Start: {ex}')
+		messagebox.showerror(GHI.title, f'Fehler beim Start: {ex.__class__.__name__}: {ex}')
 
 
 if __name__ == '__main__':
