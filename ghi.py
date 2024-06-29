@@ -275,13 +275,16 @@ class WebexApi:
 		response.raise_for_status()
 		return response.json()
 
-	def GetDuties(self, location_id, schedule_id):
+	def GetDuties(self, location_id, schedule_id, min_duty_end_ts=None):
 		event_by_duty = {}
 		for event in self.Get(f'locations/{location_id}/schedules/holidays/{schedule_id}')['events']:
+			end_ts = datetime.datetime.strptime(f'{event["endDate"]} {event["endTime"]}', '%Y-%m-%d %H:%M')
+			if min_duty_end_ts and end_ts < min_duty_end_ts:
+				self.Delete(f'locations/{location_id}/schedules/holidays/{schedule_id}/events/{event["id"]}')
+				continue
 			if event['startTime'] not in SHIFT_TIME_STRINGS:
 				raise RuntimeError(f'Ungültige Startzeit {event["startTime"]} am {event["startDate"]}!')
 			start_ts = datetime.datetime.strptime(f'{event["startDate"]} {event["startTime"]}', '%Y-%m-%d %H:%M')
-			end_ts = datetime.datetime.strptime(f'{event["endDate"]} {event["endTime"]}', '%Y-%m-%d %H:%M')
 			while start_ts < end_ts:
 				if start_ts.time() == DAY_SHIFT_START:
 					duty = Duty(start_ts.date(), Shift.day)
@@ -297,7 +300,7 @@ class WebexApi:
 					raise RuntimeError(f'Ungültige Endzeit {event["endTime"]} am {event["startDate"]}!')
 		return event_by_duty
 
-	def GetAutoAttendant(self):
+	def GetAutoAttendant(self, min_duty_end_ts):
 		jsons = self.Get('autoAttendants')['autoAttendants']
 		if len(jsons) != 1:
 			raise RuntimeError(f'Es muss genau einen Auto-Attendant geben. Gefunden: {jsons}')
@@ -311,7 +314,7 @@ class WebexApi:
 				try:
 					schedule_name = self.Get(f'locations/{attendant.location_id}/autoAttendants/{attendant.id}/callForwarding/selectiveRules/{rule["id"]}')['holidaySchedule']
 					schedule_id = schedule_id_by_name[schedule_name]
-					attendant.AddRule(Midwife(rule['name'], rule['forwardTo']), AttendantRule(rule['id'], schedule_name, schedule_id, self.GetDuties(attendant.location_id, schedule_id)))
+					attendant.AddRule(Midwife(rule['name'], rule['forwardTo']), AttendantRule(rule['id'], schedule_name, schedule_id, self.GetDuties(attendant.location_id, schedule_id, min_duty_end_ts=min_duty_end_ts)))
 				except Exception as ex:
 					raise RuntimeError(f'Fehler für {rule["name"]}: {ex}')
 		return attendant
@@ -387,7 +390,7 @@ class GHI:
 	def __init__(self, config_fn, token_fn):
 		self.config = Config(config_fn)
 		self.api = WebexApi(self.config.webex_integration, token_fn)
-		self.attendant = self.api.GetAutoAttendant()
+		self.attendant = self.api.GetAutoAttendant(datetime.datetime.combine(datetime.date.today()-datetime.timedelta(days=2), NIGHT_SHIFT_START))
 		self.forwarding_roster = None
 		self.duty_roster = None
 		self.box_by_duty = {}
