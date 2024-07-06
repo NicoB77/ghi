@@ -434,20 +434,17 @@ class GHI:
 
 	def LoadWorkbook(self):
 		try:
+			wb_fn_pattern = os.path.expanduser(self.config.wb_fn_pattern)
 			try:
-				wb_fn = max(glob.iglob(self.config.wb_fn_pattern), key=os.path.getmtime)
+				wb_fn = max(glob.iglob(wb_fn_pattern), key=os.path.getmtime)
 			except ValueError:
-				dlg_args = {}
+				dlg_args = {'initialdir': os.path.dirname(wb_fn_pattern)}
 			else:
 				dlg_args = {'initialdir': os.path.dirname(wb_fn), 'initialfile': os.path.basename(wb_fn)}
 			wb_fn = filedialog.askopenfilename(parent=self.table_frame, title='Dienstplan workbook', filetypes=[('Excel', '.xlsx')], **dlg_args)
 			if not wb_fn:
 				return
 			duty_roster = DutyRoster.FromWorkbook(wb_fn, self.config.sheet_name_pattern, self.config.start_row, self.config.start_col, self.config.primary_duty_tags)
-			errors = duty_roster.Check()
-			if errors:
-				messagebox.showerror('Konnte Dienstplan nicht laden', '\n'.join(errors), master=self.table_frame)
-				return
 			self.duty_roster = duty_roster
 			self.UpdateWidgets()
 		except Exception as ex:
