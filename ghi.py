@@ -8,7 +8,6 @@ import glob
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import itertools
 import os
-import re
 from threading import Thread
 import tkinter
 from tkinter import filedialog
@@ -90,15 +89,11 @@ class DutyRoster:
 		return self.midwife_by_name.get(name.lower())
 
 	@staticmethod
-	def FromWorkbook(wb_fn, sheet_name_pattern, start_row, start_col, primary_duty_tags):
+	def FromWorkbook(wb_fn, sheet_index, start_row, start_col, primary_duty_tags):
 		wb = openpyxl.load_workbook(wb_fn)
-		for name in wb.sheetnames:
-			if match := sheet_name_pattern.match(name):
-				beginning_of_month = datetime.date(2000+int(match.group(2)), MONTH_NUMBER_BY_LOWER_NAME[match.group(1).lower()], 1)
-				break
-		else:
-			raise RuntimeError('Kein Arbeitsblatt mit passendem Namen gefunden!')
-		sheet = wb[name]
+		sheet = wb.worksheets[sheet_index]
+		month, year = sheet.oddHeader.left.text.strip().split()
+		beginning_of_month = datetime.date(int(year), MONTH_NUMBER_BY_LOWER_NAME[month.lower()], 1)
 		day = int(sheet.cell(start_row, start_col+1).value)
 		if day > 20:
 			dates = [(beginning_of_month-datetime.timedelta(days=1)).replace(day=day)]
@@ -146,7 +141,7 @@ class Config:
 		cp = configparser.ConfigParser()
 		cp.read(config_fn, encoding='utf8')
 		wb_cfg = cp['Workbook']
-		self.sheet_name_pattern = re.compile(wb_cfg.get('sheet_name_re'), re.IGNORECASE)
+		self.sheet_index = wb_cfg.getint('sheet_index')
 		self.start_row = wb_cfg.getint('start_row')
 		self.start_col = wb_cfg.getint('start_col')
 		self.primary_duty_tags = frozenset(t.strip().lower() for t in wb_cfg['primary_duty_tags'].split(',') if t.strip())
@@ -444,7 +439,7 @@ class GHI:
 			wb_fn = filedialog.askopenfilename(parent=self.table_frame, title='Dienstplan workbook', filetypes=[('Excel', '.xlsx')], **dlg_args)
 			if not wb_fn:
 				return
-			duty_roster = DutyRoster.FromWorkbook(wb_fn, self.config.sheet_name_pattern, self.config.start_row, self.config.start_col, self.config.primary_duty_tags)
+			duty_roster = DutyRoster.FromWorkbook(wb_fn, self.config.sheet_index, self.config.start_row, self.config.start_col, self.config.primary_duty_tags)
 			self.duty_roster = duty_roster
 			self.UpdateWidgets()
 		except Exception as ex:
@@ -463,7 +458,8 @@ class GHI:
 			for midwife in self.forwarding_roster.midwife_by_name.values():
 				mw = self.duty_roster.GetMidwife(midwife.name)
 				if not mw:
-					midwifes.append(mw)
+					if midwife in self.forwarding_roster.midwife_by_duty.values():
+						midwifes.append(midwife)
 				elif mw != midwife:
 					raise RuntimeError(f'Inkonsistente Hebammendaten: {midwife} und {mw}!')
 		else:
@@ -496,7 +492,7 @@ class GHI:
 			box_row += 3
 		else:
 			duty_row = None
-		if self.forwarding_roster and min_date <= self.forwarding_roster.dates[-1]:
+		if self.forwarding_roster.dates and min_date <= self.forwarding_roster.dates[-1]:
 			forwarding_row = box_row
 			box_row += 3
 		else:
