@@ -90,7 +90,7 @@ class DutyRoster:
 
 	@staticmethod
 	def FromWorkbook(wb_fn, sheet_index, start_row, start_col, primary_duty_tags):
-		wb = openpyxl.load_workbook(wb_fn)
+		wb = openpyxl.load_workbook(wb_fn, data_only=True)
 		sheet = wb.worksheets[sheet_index]
 		month, year = sheet.oddHeader.left.text.strip().split()
 		beginning_of_month = datetime.date(int(year), MONTH_NUMBER_BY_LOWER_NAME[month.lower()], 1)
@@ -444,6 +444,7 @@ class GHI:
 			self.UpdateWidgets()
 		except Exception as ex:
 			messagebox.showerror('Konnte Dienstplan nicht laden', str(ex), master=self.table_frame)
+			raise
 
 	def UpdateWidgets(self):
 		min_date = datetime.date.today()-datetime.timedelta(days=1)
