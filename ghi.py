@@ -20,8 +20,6 @@ import openpyxl
 from requests_oauthlib import OAuth2Session
 
 
-MONTH_NAME_BY_NUMBER = {1: 'Januar', 2: 'Februar', 3: 'März', 4: 'April', 5: 'Mai', 6: 'Juni', 7: 'Juli', 8: 'August', 9: 'September', 10: 'Oktober', 11: 'November', 12: 'Dezember'}
-MONTH_NUMBER_BY_LOWER_NAME = {v.lower(): k for k, v in MONTH_NAME_BY_NUMBER.items()}
 DAY_SHIFT_START = datetime.time(10)
 NIGHT_SHIFT_START = datetime.time(20)
 SHIFT_TIME_STRINGS = frozenset(t.strftime('%H:%M') for t in (DAY_SHIFT_START, NIGHT_SHIFT_START))
@@ -92,22 +90,18 @@ class DutyRoster:
 	def FromWorkbook(wb_fn, sheet_index, start_row, start_col, primary_duty_tags):
 		wb = openpyxl.load_workbook(wb_fn, data_only=True)
 		sheet = wb.worksheets[sheet_index]
-		month, year = sheet.oddHeader.left.text.strip().split()
-		beginning_of_month = datetime.date(int(year), MONTH_NUMBER_BY_LOWER_NAME[month.lower()], 1)
-		day = int(sheet.cell(start_row, start_col+1).value)
-		if day > 20:
-			dates = [(beginning_of_month-datetime.timedelta(days=1)).replace(day=day)]
-		else:
-			dates = [beginning_of_month.replace(day=day)]
-		for end_col in range(start_col+1, start_col+100):
-			try:
-				day = int(sheet.cell(start_row, end_col+1).value)
-			except Exception:
-				end_col -= 1
+		end_of_prev_month = sheet.cell(start_row, start_col+1).value.date()
+		dates = []
+		for end_col in range(start_col+2, start_col+100):
+			date = sheet.cell(start_row, end_col).value
+			if isinstance(date, datetime.date):
+				date = date.date()
+				expected_date = (dates[-1] if dates else end_of_prev_month)+datetime.timedelta(days=1)
+				dates.append(date)
+				if date.day != len(dates) or date != expected_date:
+					raise RuntimeError(f'Ungültige Tage in Dienstplan: in Spalte {end_col} wurde {expected_date} erwartet, aber {date} gefunden!')
+			else:
 				break
-			dates.append(dates[-1]+datetime.timedelta(days=1))
-			if day != dates[-1].day:
-				raise RuntimeError(f'Ungültige Tage in Dienstplan: in Spalte {end_col} wurde {dates[-1].day} erwartet, aber {day} gefunden!')
 		else:
 			raise RuntimeError('Zu viele Spalten in Dienstplan!')
 		duty_roster = DutyRoster(dates)
@@ -535,9 +529,9 @@ class GHI:
 		row = 0
 		col = 0
 		for key in box_values:
-			ttk.Label(self.midwife_frame, text=f'{key}: {self.midwife_by_box_value[key].name}').grid(row=row, column=col, sticky='we')
+			ttk.Label(self.midwife_frame, text=f'{key}: {self.midwife_by_box_value[key].name} ({self.midwife_by_box_value[key].phone})').grid(row=row, column=col, sticky='we', padx=5)
 			col += 1
-			if col > self.config.n_midwifes_per_row:
+			if col >= self.config.n_midwifes_per_row:
 				row += 1
 				col = 0
 		self.midwife_frame.columnconfigure(tuple(range(col if row == 0 else self.config.n_midwifes_per_row)), weight=1)
