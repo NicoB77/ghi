@@ -90,9 +90,10 @@ class DutyRoster:
 	def FromWorkbook(wb_fn, sheet_index, start_row, start_col, primary_duty_tags):
 		wb = openpyxl.load_workbook(wb_fn, data_only=True)
 		sheet = wb.worksheets[sheet_index]
-		end_of_prev_month = sheet.cell(start_row, start_col+1).value.date()
+		beginning_of_month_col = start_col+2
+		end_of_prev_month = sheet.cell(start_row, beginning_of_month_col-1).value.date()
 		dates = []
-		for end_col in range(start_col+2, start_col+100):
+		for end_col in range(beginning_of_month_col, beginning_of_month_col+40):
 			date = sheet.cell(start_row, end_col).value
 			if isinstance(date, datetime.date):
 				date = date.date()
@@ -117,7 +118,7 @@ class DutyRoster:
 			duty_roster.AddMidwife(midwife)
 			for j, date in enumerate(duty_roster.dates):
 				for offset, st in [(0, Shift.day), (1, Shift.night)]:
-					if tag := _ReadString(sheet.cell(row+offset, start_col+1+j).value).lower():
+					if tag := _ReadString(sheet.cell(row+offset, beginning_of_month_col+j).value).lower():
 						if tag in primary_duty_tags:
 							duty_roster.Add(midwife, Duty(date, st))
 		return duty_roster
