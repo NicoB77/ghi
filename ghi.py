@@ -108,19 +108,25 @@ class DutyRoster:
 		duty_roster = DutyRoster(dates)
 		for row in range(start_row+2, start_row+100, 2):
 			name = _ReadString(sheet.cell(row, start_col).value)
-			if not name:
-				break
 			midwife = Midwife(name, _ReadString(sheet.cell(row+1, start_col).value).replace(' ', '').replace('-', ''))
-			try:
-				int(midwife.phone)
-			except ValueError:
+			if not name or not midwife.phone.isdigit() and (name.startswith('Rufbereitschaft ') or name.lower() in primary_duty_tags):
 				break
-			duty_roster.AddMidwife(midwife)
+			duties = []
 			for j, date in enumerate(duty_roster.dates):
 				for offset, st in [(0, Shift.day), (1, Shift.night)]:
-					if tag := _ReadString(sheet.cell(row+offset, beginning_of_month_col+j).value).lower():
-						if tag in primary_duty_tags:
-							duty_roster.Add(midwife, Duty(date, st))
+					if (tag := _ReadString(sheet.cell(row+offset, beginning_of_month_col+j).value).lower()) and tag in primary_duty_tags:
+						duties.append(Duty(date, st))
+			if midwife.phone.isdigit():
+				duty_roster.AddMidwife(midwife)
+				for duty in duties:
+					duty_roster.Add(midwife, duty)
+			elif duties:
+				raise RuntimeError(f'Ungültige Telefonnummer "{midwife.phone}" für {midwife.name}!')
+		if not duty_roster.midwife_by_duty:
+			raise RuntimeError('Keine Dienste gefunden!')
+		if Duty(duty_roster.dates[-1], Shift.day) not in duty_roster.midwife_by_duty:
+			max_date = max(d.date for d in duty_roster.midwife_by_duty)
+			duty_roster.dates = duty_roster.dates[:duty_roster.dates.index(max_date)+1]
 		return duty_roster
 
 
